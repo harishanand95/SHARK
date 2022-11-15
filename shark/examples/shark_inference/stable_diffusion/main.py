@@ -1,7 +1,7 @@
 from transformers import CLIPTextModel, CLIPTokenizer
 import torch
 from PIL import Image
-from diffusers import LMSDiscreteScheduler
+from diffusers import LMSDiscreteScheduler, DPMSolverMultistepScheduler
 from tqdm.auto import tqdm
 import numpy as np
 from stable_args import args
@@ -52,11 +52,22 @@ if __name__ == "__main__":
 
     tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
 
-    scheduler = LMSDiscreteScheduler(
-        beta_start=0.00085,
-        beta_end=0.012,
-        beta_schedule="scaled_linear",
-        num_train_timesteps=1000,
+    # scheduler = LMSDiscreteScheduler(
+    #     beta_start=0.00085,
+    #     beta_end=0.012,
+    #     beta_schedule="scaled_linear",
+    #     num_train_timesteps=1000,
+    # )
+
+    scheduler = DPMSolverMultistepScheduler.from_config(
+        "CompVis/stable-diffusion-v1-4",
+        subfolder="scheduler",
+        solver_order=2,
+        predict_epsilon=True,
+        thresholding=False,
+        algorithm_type="dpmsolver++",
+        solver_type="midpoint",
+        denoise_final=True,  # the influence of this trick is effective for small (e.g. <=10) steps
     )
 
     start = time.time()
@@ -92,18 +103,20 @@ if __name__ == "__main__":
     scheduler.set_timesteps(num_inference_steps)
     scheduler.is_scale_input_called = True
 
-    latents = latents * scheduler.sigmas[0]
+    # latents = latents * scheduler.sigmas[0]
     text_embeddings_numpy = text_embeddings.detach().numpy()
     avg_ms = 0
 
     for i, t in tqdm(enumerate(scheduler.timesteps)):
         step_start = time.time()
+        latents = scheduler.scale_model_input(latents, t)
         print(f"i = {i} t = {t}", end="")
         timestep = torch.tensor([t]).to(dtype).detach().numpy()
         if args.precision == "int8":
             timestep = np.array(t).astype("int64")
         latents_numpy = latents.detach().numpy()
-        sigma_numpy = np.array(scheduler.sigmas[i]).astype(np.float32)
+
+        sigma_numpy = np.array(scheduler.sigma_t[i]).astype(np.float32)
 
         profile_device = start_profiling(file_path="unet.rdc")
         noise_pred = unet.forward(
@@ -122,7 +135,7 @@ if __name__ == "__main__":
         step_ms = int((step_time) * 1000)
         print(f" ({step_ms}ms)")
 
-        latents = scheduler.step(noise_pred, i, latents)["prev_sample"]
+        latents = scheduler.step(noise_pred, t, latents)["prev_sample"]
     avg_ms = 1000 * avg_ms / args.steps
     print(f"Average step time: {avg_ms}ms/it")
 
